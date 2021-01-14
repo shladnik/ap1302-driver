@@ -34,12 +34,18 @@
 #define AP1302_MAX_WIDTH			4224U
 #define AP1302_MAX_HEIGHT 			4092U
 
-#define AP1302_REG_16BIT(n)			((2 << 24) | (n))
-#define AP1302_REG_32BIT(n)			((4 << 24) | (n))
-#define AP1302_REG_SIZE(n)			((n) >> 24)
-#define AP1302_REG_ADDR(n)			((n) & 0x0000ffff)
-#define AP1302_REG_PAGE(n)			((n) & 0x00ff0000)
-#define AP1302_REG_PAGE_MASK			0x00ff0000
+#define AP1302_REG_ADV_MASK			0x80000000
+#define AP1302_REG_8BIT(n)			((1 << 26) | (n))
+#define AP1302_REG_16BIT(n)			((2 << 26) | (n))
+#define AP1302_REG_32BIT(n)			((4 << 26) | (n))
+#define AP1302_REG_ADV_8BIT(n)			((1 << 26) | (n) | AP1302_REG_ADV_MASK)
+#define AP1302_REG_ADV_16BIT(n)			((2 << 26) | (n) | AP1302_REG_ADV_MASK)
+#define AP1302_REG_ADV_32BIT(n)			((4 << 26) | (n) | AP1302_REG_ADV_MASK)
+#define AP1302_REG_SIZE(n)			(((n) >> 26) & 0x7)
+#define AP1302_REG_ADDR(n)			((n) & 0x43ffffff)
+#define AP1302_REG_ADV(n)			((n & AP1302_REG_ADV_MASK) ? 1 : 0)
+#define AP1302_REG_PAGE_MASK			0x43fff000
+#define AP1302_REG_PAGE(n)			((n) & 0x43fff000)
 
 /* Info Registers */
 #define AP1302_CHIP_VERSION			AP1302_REG_16BIT(0x0000)
@@ -244,7 +250,7 @@
 #define AP1302_SIP_CRC				AP1302_REG_16BIT(0xf052)
 
 /* Advanced System Registers */
-#define AP1302_ADV_IRQ_SYS_INTE			AP1302_REG_32BIT(0x00230000)
+#define AP1302_ADV_IRQ_SYS_INTE			AP1302_REG_ADV_32BIT(0x00230000)
 #define AP1302_ADV_IRQ_SYS_INTE_TEST_COUNT	BIT(25)
 #define AP1302_ADV_IRQ_SYS_INTE_HINF_1		BIT(24)
 #define AP1302_ADV_IRQ_SYS_INTE_HINF_0		BIT(23)
@@ -267,7 +273,7 @@
 #define AP1302_ADV_IRQ_SYS_INTE_GPIO_PIN	BIT(0)
 
 /* Advanced Slave MIPI Registers */
-#define AP1302_ADV_CAPTURE_A_FV_CNT		AP1302_REG_32BIT(0x00490040)
+#define AP1302_ADV_CAPTURE_A_FV_CNT		AP1302_REG_ADV_32BIT(0x00490040)
 
 struct ap1302_device;
 
@@ -466,10 +472,11 @@ static int __ap1302_write(struct ap1302_device *ap1302, u32 reg, u32 val)
 
 static int ap1302_write(struct ap1302_device *ap1302, u32 reg, u32 val)
 {
-	u32 page = AP1302_REG_PAGE(reg);
 	int ret;
 
-	if (page) {
+	if (AP1302_REG_ADV(reg)) {
+		u32 addr = AP1302_REG_ADDR(reg);
+		u32 page = AP1302_REG_PAGE(addr);
 		if (ap1302->reg_page != page) {
 			ret = ap1302_write(ap1302, AP1302_ADVANCED_BASE, page);
 			if (ret < 0)
@@ -478,6 +485,7 @@ static int ap1302_write(struct ap1302_device *ap1302, u32 reg, u32 val)
 			ap1302->reg_page = page;
 		}
 
+		reg &= ~AP1302_REG_ADV_MASK;
 		reg &= ~AP1302_REG_PAGE_MASK;
 		reg += AP1302_REG_ADV_START;
 	}
@@ -533,10 +541,11 @@ static int __ap1302_read(struct ap1302_device *ap1302, u32 reg, u32 *val)
 
 static int ap1302_read(struct ap1302_device *ap1302, u32 reg, u32 *val)
 {
-	u32 page = AP1302_REG_PAGE(reg);
 	int ret;
 
-	if (page) {
+	if (AP1302_REG_ADV(reg)) {
+		u32 addr = AP1302_REG_ADDR(reg);
+		u32 page = AP1302_REG_PAGE(addr);
 		if (ap1302->reg_page != page) {
 			ret = ap1302_write(ap1302, AP1302_ADVANCED_BASE, page);
 			if (ret < 0)
@@ -545,6 +554,7 @@ static int ap1302_read(struct ap1302_device *ap1302, u32 reg, u32 *val)
 			ap1302->reg_page = page;
 		}
 
+		reg &= ~AP1302_REG_ADV_MASK;
 		reg &= ~AP1302_REG_PAGE_MASK;
 		reg += AP1302_REG_ADV_START;
 	}
