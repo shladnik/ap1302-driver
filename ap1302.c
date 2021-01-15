@@ -583,6 +583,7 @@ static int ap1302_check_crc(struct ap1302_device *ap1302)
 		dev_warn(ap1302->dev,
 			 "CRC mismatch: expected 0x%04x, got 0x%04x\n",
 			 ap1302->crc, val);
+		ap1302->crc = val;
 		return -EAGAIN;
 	}
 
@@ -668,6 +669,9 @@ static int ap1302_power_on(struct ap1302_device *ap1302)
 	 * how long this takes.
 	 */
 	usleep_range(10000, 11000);
+
+	/* SIPS_CRC value is 0xffff after reset. */
+	ap1302->crc = 0xffff;
 
 	return 0;
 }
@@ -1714,11 +1718,6 @@ static int ap1302_load_firmware(struct ap1302_device *ap1302)
 	fw_hdr = (const struct ap1302_firmware_header *)ap1302->fw->data;
 	fw_data = (u8 *)&fw_hdr[1];
 	fw_size = ap1302->fw->size - sizeof(*fw_hdr);
-
-	/* Clear the CRC register. */
-	ret = ap1302_write(ap1302, AP1302_SIP_CRC, 0xffff);
-	if (ret)
-		return ret;
 
 	/*
 	 * Load the PLL initialization settings, set the bootdata stage to 2 to
