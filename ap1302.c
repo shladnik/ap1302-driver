@@ -334,6 +334,7 @@ struct ap1302_device {
 	struct regmap *regmap16;
 	struct regmap *regmap32;
 	u32 reg_page;
+	u16 crc;
 
 	const struct firmware *fw;
 
@@ -438,6 +439,31 @@ static const struct regmap_config ap1302_reg32_config = {
 	.cache_type = REGCACHE_NONE,
 };
 
+static void ap1302_update_crc(struct ap1302_device *ap1302, u16 addr, u8 val)
+{
+	u16 crc = ap1302->crc;
+
+	if (addr == AP1302_REG_ADDR(AP1302_SIP_CRC)) {
+		crc = (crc & ~0xff00) | (val << 8);
+	} else if (addr == AP1302_REG_ADDR(AP1302_SIP_CRC) + 1) {
+		crc = (crc & ~0x00ff) | (val << 0);
+	} else {
+		/* Polynomial: 1 + x^5 + x^12 + x^16 */
+		u32 v = (addr << 8) | val;
+		unsigned int i;
+		for (i = 0; i < 24; i++) {
+			unsigned int bit = (v >> 23) & 0x1;
+			v <<= 1;
+			bit ^= (crc >> 15) & 0x1;
+			crc = (crc << 1) ^ ((bit <<  0) |
+			                    (bit <<  5) |
+			                    (bit << 12));
+		}
+	}
+
+	ap1302->crc = crc;
+}
+
 static int __ap1302_write(struct ap1302_device *ap1302, u32 reg, u32 val)
 {
 	unsigned int size = AP1302_REG_SIZE(reg);
@@ -447,9 +473,15 @@ static int __ap1302_write(struct ap1302_device *ap1302, u32 reg, u32 val)
 	switch (size) {
 	case 2:
 		ret = regmap_write(ap1302->regmap16, addr, val);
+		ap1302_update_crc(ap1302, addr+0, (val >>  8) & 0xff);
+		ap1302_update_crc(ap1302, addr+1, (val >>  0) & 0xff);
 		break;
 	case 4:
 		ret = regmap_write(ap1302->regmap32, addr, val);
+		ap1302_update_crc(ap1302, addr+0, (val >> 24) & 0xff);
+		ap1302_update_crc(ap1302, addr+1, (val >> 16) & 0xff);
+		ap1302_update_crc(ap1302, addr+2, (val >>  8) & 0xff);
+		ap1302_update_crc(ap1302, addr+3, (val >>  0) & 0xff);
 		break;
 	default:
 		return -EINVAL;
@@ -537,6 +569,24 @@ static int ap1302_read(struct ap1302_device *ap1302, u32 reg, u32 *val)
 	}
 
 	return __ap1302_read(ap1302, reg, val);
+}
+
+static int ap1302_check_crc(struct ap1302_device *ap1302)
+{
+	int ret;
+	u32 val;
+	ret = ap1302_read(ap1302, AP1302_SIP_CRC, &val);
+	if (ret)
+		return ret;
+
+	if (val != ap1302->crc) {
+		dev_warn(ap1302->dev,
+			 "CRC mismatch: expected 0x%04x, got 0x%04x\n",
+			 ap1302->crc, val);
+		return -EAGAIN;
+	}
+
+	return 0;
 }
 
 /* -----------------------------------------------------------------------------
@@ -1625,6 +1675,7 @@ static int ap1302_write_fw_window(struct ap1302_device *ap1302, const u8 *buf,
 		unsigned int write_addr;
 		unsigned int write_size;
 		int ret;
+		int i;
 
 		/*
 		 * Write at most len bytes, from the current position to the
@@ -1637,6 +1688,9 @@ static int ap1302_write_fw_window(struct ap1302_device *ap1302, const u8 *buf,
 				       write_size);
 		if (ret)
 			return ret;
+
+		for (i = 0; i < write_size; i++)
+			ap1302_update_crc(ap1302, write_addr + i, *(buf + i));
 
 		buf += write_size;
 		len -= write_size;
@@ -1655,7 +1709,6 @@ static int ap1302_load_firmware(struct ap1302_device *ap1302)
 	unsigned int fw_size;
 	const u8 *fw_data;
 	unsigned int win_pos = 0;
-	unsigned int crc;
 	int ret;
 
 	fw_hdr = (const struct ap1302_firmware_header *)ap1302->fw->data;
@@ -1690,16 +1743,9 @@ static int ap1302_load_firmware(struct ap1302_device *ap1302)
 
 	msleep(40);
 
-	ret = ap1302_read(ap1302, AP1302_SIP_CRC, &crc);
+	ret = ap1302_check_crc(ap1302);
 	if (ret)
 		return ret;
-
-	if (crc != fw_hdr->crc) {
-		dev_warn(ap1302->dev,
-			 "CRC mismatch: expected 0x%04x, got 0x%04x\n",
-			 fw_hdr->crc, crc);
-		return -EAGAIN;
-	}
 
 	/*
 	 * Write 0xffff to the bootdata_stage register to indicate to the
