@@ -356,10 +356,13 @@ static inline struct ap1302_device *to_ap1302(struct v4l2_subdev *sd)
 	return container_of(sd, struct ap1302_device, sd);
 }
 
-struct ap1302_firmware_header {
+#define AP1302_HEADER_VERSION(a, b, c) (((a) << 16) | ((b) << 8) | (c))
+
+struct __attribute__((__packed__)) ap1302_firmware_header {
+	u32 version;
+	u32 header_size;
 	u16 pll_init_size;
-	u16 crc;
-} __packed;
+};
 
 #define MAX_FW_LOAD_RETRIES 3
 
@@ -1616,9 +1619,7 @@ static int ap1302_request_firmware(struct ap1302_device *ap1302)
 		"_dual",
 	};
 
-	const struct ap1302_firmware_header *fw_hdr;
 	unsigned int num_sensors;
-	unsigned int fw_size;
 	unsigned int i;
 	char name[64];
 	int ret;
@@ -1641,21 +1642,6 @@ static int ap1302_request_firmware(struct ap1302_device *ap1302)
 	if (ret) {
 		dev_err(ap1302->dev, "Failed to request firmware: %d\n", ret);
 		return ret;
-	}
-
-	/*
-	 * The firmware binary contains a header defined by the
-	 * ap1302_firmware_header structure. The firmware itself (also referred
-	 * to as bootdata) follows the header. Perform sanity checks to ensure
-	 * the firmware is valid.
-	 */
-	fw_hdr = (const struct ap1302_firmware_header *)ap1302->fw->data;
-	fw_size = ap1302->fw->size - sizeof(*fw_hdr);
-
-	if (fw_hdr->pll_init_size > fw_size) {
-		dev_err(ap1302->dev,
-			"Invalid firmware: PLL init size too large\n");
-		return -EINVAL;
 	}
 
 	return 0;
@@ -1714,16 +1700,37 @@ static int ap1302_load_firmware(struct ap1302_device *ap1302)
 	const u8 *fw_data;
 	unsigned int win_pos = 0;
 	int ret;
+	int pll_init_size;
 
 	fw_hdr = (const struct ap1302_firmware_header *)ap1302->fw->data;
-	fw_data = (u8 *)&fw_hdr[1];
-	fw_size = ap1302->fw->size - sizeof(*fw_hdr);
+
+	switch (fw_hdr->version) {
+	case AP1302_HEADER_VERSION(1, 0, 0):
+		fw_data = (u8 *)fw_hdr     + fw_hdr->header_size;
+		fw_size = ap1302->fw->size - fw_hdr->header_size;
+		pll_init_size = fw_hdr->pll_init_size;
+		break;
+	default:
+		dev_info(ap1302->dev, "Unknown header version %08x, assuming no header.",
+		         fw_hdr->version);
+		fw_data = ap1302->fw->data;
+		fw_size = ap1302->fw->size;
+		/* It is safe to assume that PLL configuration is contained
+		 * within first 4094B of data. So if pll_init_size is not
+		 * explicitly provided we can use this value as a backup. We
+		 * should not set this value any larger since crossing the
+		 * 4KB page boundary also triggers bootdata execution.
+		 */
+		pll_init_size = min(4094u, fw_size);
+		break;
+	}
+
 
 	/*
 	 * Load the PLL initialization settings, set the bootdata stage to 2 to
 	 * apply the basic_init_hp settings, and wait 1ms for the PLL to lock.
 	 */
-	ret = ap1302_write_fw_window(ap1302, fw_data, fw_hdr->pll_init_size,
+	ret = ap1302_write_fw_window(ap1302, fw_data, pll_init_size,
 				     &win_pos);
 	if (ret)
 		return ret;
@@ -1735,8 +1742,8 @@ static int ap1302_load_firmware(struct ap1302_device *ap1302)
 	usleep_range(1000, 2000);
 
 	/* Load the rest of the bootdata content and verify the CRC. */
-	ret = ap1302_write_fw_window(ap1302, fw_data + fw_hdr->pll_init_size,
-				     fw_size - fw_hdr->pll_init_size, &win_pos);
+	ret = ap1302_write_fw_window(ap1302, fw_data + pll_init_size,
+				     fw_size - pll_init_size, &win_pos);
 	if (ret)
 		return ret;
 
